@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+
+<body>
+    <h1>Embed test</h1>
+    <p>Open this after running:
+    <pre>go run app.go</pre>
+    </p>
+    <!-- replace gref with HOST -->
+    <link rel="stylesheet" href="http://localhost:8080/embed.css">
+
+    <div class="my-embed" data-url="https://www.google.com" data-theme="dark"></div>
+    <div class="my-embed" data-url="https://www.github.com/velox0" data-theme="dark"></div>
+    <div class="my-embed" data-url="https://www.velox0.com/art" data-theme="dark"></div>
+    <div class="my-embed" data-url="https://openai.com/research/index/" data-theme="dark"></div>
+
+    <!-- replace src with HOST -->
+    <script async src="http://localhost:8080/embed.js"></script>
+
+</body>
+
+</html>
