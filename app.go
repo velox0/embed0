@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chromedp/chromedp"
 	"github.com/joho/godotenv"
 	"github.com/tdewolff/minify/v2"
 	"github.com/tdewolff/minify/v2/js"
@@ -33,13 +35,10 @@ type PageInfo struct {
 var host string
 
 // INIT //
-
 func init() {
-	// Initialize minifier and minify JS during startup //
 	m := minify.New()
 	m.AddFunc("text/javascript", js.Minify)
 
-	// Read original JS file
 	jsContent, err := os.ReadFile("static/embed.js")
 	if err != nil {
 		log.Fatal("Failed to read embed.js:", err)
@@ -56,7 +55,7 @@ func init() {
 }
 
 func main() {
-	// ENV //
+	// ENV
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("Error loading .env file, using defaults")
@@ -71,7 +70,6 @@ func main() {
 	fs := http.FileServer(http.Dir("static"))
 	http.Handle("/static/", http.StripPrefix("/static/", fs))
 
-	// API routes //
 	http.HandleFunc("/api/embed", withCORS(embedHandler))
 	http.HandleFunc("/embed.js", withCORS(jsHandler))
 	http.HandleFunc("/embed.css", withCORS(cssHandler))
@@ -86,7 +84,7 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
-// Handlers //
+// Handlers
 
 func metaGenHandler(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("url")
@@ -105,10 +103,9 @@ func metaGenHandler(w http.ResponseWriter, r *http.Request) {
 		targetURL = "https://" + targetURL
 	}
 
-	// Fetch metadata with enhanced content extraction
+	// Use enhanced fetch with headless fallback
 	title, description, images := fetchMetaEnhanced(targetURL)
 	if len(images) == 0 {
-		// Fallback image
 		if u, err := url.Parse(targetURL); err == nil {
 			images = append(images, "https://"+u.Host+"/favicon.ico")
 		}
@@ -121,7 +118,7 @@ func metaGenHandler(w http.ResponseWriter, r *http.Request) {
 
 func jsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript")
-	w.Write(minifiedJS) // Serve pre-minified version
+	w.Write(minifiedJS)
 }
 
 func embedHandler(w http.ResponseWriter, r *http.Request) {
@@ -138,7 +135,8 @@ func embedHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	title, desc, images := fetchMeta(url)
+	// Use enhanced fetch with headless fallback
+	title, desc, images := fetchMetaEnhanced(url)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(PageInfo{
 		Title:       title,
@@ -154,7 +152,7 @@ func cssHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "static/embed.css")
 }
 
-// Utility functions //
+// Utility functions
 
 func withCORS(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -169,149 +167,36 @@ func withCORS(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func fetchMeta(target string) (string, string, []string) {
-	resp, err := http.Get(target)
+// -------- HEADLESS BROWSER FALLBACK --------
+
+// Uses chromedp (Google Chrome) to fetch and parse metadata
+func fetchMetaWithHeadless(target string) (string, string, []string, error) {
+	ctx, cancel := chromedp.NewContext(context.Background())
+	defer cancel()
+	var htmlContent string
+
+	err := chromedp.Run(ctx,
+		chromedp.Navigate(target),
+		chromedp.Sleep(3*time.Second),
+		chromedp.OuterHTML("html", &htmlContent),
+	)
 	if err != nil {
-		return target, "", nil
+		return "", "", nil, err
 	}
-	defer resp.Body.Close()
 
-	doc, err := html.Parse(resp.Body)
+	doc, err := html.Parse(strings.NewReader(htmlContent))
 	if err != nil {
-		return target, "", nil
+		return "", "", nil, err
 	}
 
-	var title, desc string
-	var images []string
-
-	var f func(*html.Node)
-	f = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			if n.Data == "title" && n.FirstChild != nil && title == "" {
-				title = strings.TrimSpace(n.FirstChild.Data)
-			}
-			if n.Data == "meta" {
-				var name, property, content string
-				for _, attr := range n.Attr {
-					switch strings.ToLower(attr.Key) {
-					case "name":
-						name = strings.ToLower(attr.Val)
-					case "property":
-						property = strings.ToLower(attr.Val)
-					case "content":
-						content = attr.Val
-					}
-				}
-				if (name == "description" || property == "og:description") && desc == "" {
-					desc = content
-				}
-				if (property == "og:title" || name == "title") && title == "" {
-					title = content
-				}
-				if (property == "og:image" || name == "twitter:image") && content != "" {
-					images = append(images, content)
-				}
-			}
-
-			if n.Data == "img" && len(images) == 0 {
-				for _, attr := range n.Attr {
-					if attr.Key == "src" && !strings.HasPrefix(attr.Val, "data:") {
-						images = append(images, attr.Val)
-						break // Stop after finding first image
-					}
-				}
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
-	}
-
-	f(doc)
-
-	if title == "" {
-		if u, err := url.Parse(target); err == nil {
-			title = u.Hostname()
-		} else {
-			title = "Untitled Page"
-		}
-	}
-
-	if desc == "" {
-		desc = "No description available"
-	}
-
-	// Fix image paths if needed
-	if len(images) > 0 {
-		baseURL, err := url.Parse(target)
-		if err == nil {
-			for i, img := range images {
-				images[i] = fixURL(strings.TrimSpace(img), baseURL)
-			}
-		}
-		images = uniqueStrings(images)
-	}
-
-	return title, desc, images
+	title, desc, images := parseMetaFromHTML(doc, target)
+	return title, desc, images, nil
 }
 
-// fixURL converts relative or protocol-relative paths to absolute //
-func fixURL(img string, base *url.URL) string {
-	if img == "" {
-		return ""
-	}
-	if strings.HasPrefix(img, "//") {
-		return base.Scheme + ":" + img
-	}
-	if strings.HasPrefix(img, "/") {
-		return base.Scheme + "://" + base.Host + img
-	}
-	if !strings.HasPrefix(img, "http://") && !strings.HasPrefix(img, "https://") {
-		return base.Scheme + "://" + base.Host + "/" + img
-	}
-	return img
-}
+// -------- METADATA EXTRACTION COMMON LOGIC --------
 
-func uniqueStrings(slice []string) []string {
-	keys := make(map[string]bool)
-	list := []string{}
-	for _, entry := range slice {
-		if _, value := keys[entry]; !value {
-			keys[entry] = true
-			list = append(list, entry)
-		}
-	}
-	return list
-}
-
-func fetchMetaEnhanced(target string) (string, string, []string) {
-	// Create a custom HTTP client with timeout
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	// Create a request with a browser-like User-Agent
-	req, err := http.NewRequest("GET", target, nil)
-	if err != nil {
-		return target, "", nil
-	}
-
-	// Set a desktop Chrome User-Agent
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-	// Make the request
-	resp, err := client.Do(req)
-	if err != nil {
-		return target, "", nil
-	}
-	defer resp.Body.Close()
-
-	// Rest of your parsing logic...
-	doc, err := html.Parse(resp.Body)
-	if err != nil {
-		return target, "", nil
-	}
-
+// Shared logic for extracting metadata from parsed HTML node
+func parseMetaFromHTML(doc *html.Node, target string) (string, string, []string) {
 	var (
 		title         string
 		description   string
@@ -381,10 +266,48 @@ func fetchMetaEnhanced(target string) (string, string, []string) {
 				images[i] = fixURL(strings.TrimSpace(img), baseURL)
 			}
 		}
+		images = uniqueStrings(images)
 	}
 
 	return title, description, images
 }
+
+// Metadata fetch using HTTP client //
+func fetchMetaEnhanced(target string) (string, string, []string) {
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	req, err := http.NewRequest("GET", target, nil)
+	if err != nil {
+		return target, "", nil
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil || (resp.StatusCode == 403 || resp.StatusCode == 503) {
+		// Fallback: Try fetching with headless browser
+		title, desc, images, err2 := fetchMetaWithHeadless(target)
+		if err2 == nil {
+			return title, desc, images
+		}
+		return target, "", nil
+	}
+	defer resp.Body.Close()
+
+	doc, err := html.Parse(resp.Body)
+	if err != nil {
+		// Fallback: Try with headless browser if parsing fails
+		title, desc, images, err2 := fetchMetaWithHeadless(target)
+		if err2 == nil {
+			return title, desc, images
+		}
+		return target, "", nil
+	}
+	return parseMetaFromHTML(doc, target)
+}
+
+// Meta Extraction Utilities //
 
 func processMetaTag(n *html.Node, title, description *string, images *[]string) {
 	var name, property, content string
@@ -402,7 +325,6 @@ func processMetaTag(n *html.Node, title, description *string, images *[]string) 
 	if content == "" {
 		return
 	}
-
 	if (name == "description" || property == "og:description") && *description == "" {
 		*description = content
 	}
@@ -480,4 +402,32 @@ func generateMetaHTML(url, title, description string, images []string) string {
 		template.HTMLEscapeString(title),
 		template.HTMLEscapeString(description),
 		template.HTMLEscapeString(url))
+}
+
+func fixURL(img string, base *url.URL) string {
+	if img == "" {
+		return ""
+	}
+	if strings.HasPrefix(img, "//") {
+		return base.Scheme + ":" + img
+	}
+	if strings.HasPrefix(img, "/") {
+		return base.Scheme + "://" + base.Host + img
+	}
+	if !strings.HasPrefix(img, "http://") && !strings.HasPrefix(img, "https://") {
+		return base.Scheme + "://" + base.Host + "/" + img
+	}
+	return img
+}
+
+func uniqueStrings(slice []string) []string {
+	keys := make(map[string]bool)
+	list := []string{}
+	for _, entry := range slice {
+		if _, value := keys[entry]; !value {
+			keys[entry] = true
+			list = append(list, entry)
+		}
+	}
+	return list
 }
