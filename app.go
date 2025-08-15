@@ -20,6 +20,8 @@ import (
 	"golang.org/x/net/html"
 )
 
+const version = "v1.1.0"
+
 var (
 	minifiedJS []byte
 )
@@ -74,6 +76,7 @@ func main() {
 	http.HandleFunc("/embed.js", withCORS(jsHandler))
 	http.HandleFunc("/embed.css", withCORS(cssHandler))
 	http.HandleFunc("/metagen", withCORS(metaGenHandler))
+	http.HandleFunc("/version", withCORS(versionHandler))
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -152,6 +155,11 @@ func cssHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "static/embed.css")
 }
 
+func versionHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write([]byte(version))
+}
+
 // Utility functions
 
 func withCORS(h http.HandlerFunc) http.HandlerFunc {
@@ -220,7 +228,7 @@ func parseMetaFromHTML(doc *html.Node, target string) (string, string, []string)
 					paragraphs = append(paragraphs, text)
 				}
 			case "p":
-				if text := extractText(n); text != "" && len(paragraphs) < 3 { // Limit # of paragraphs
+				if text := extractText(n); text != "" && len(paragraphs) < 3 {
 					paragraphs = append(paragraphs, text)
 				}
 			case "img":
@@ -239,7 +247,6 @@ func parseMetaFromHTML(doc *html.Node, target string) (string, string, []string)
 
 	f(doc)
 
-	// Fallback title from URL
 	if title == "" {
 		if u, err := url.Parse(target); err == nil {
 			title = u.Hostname()
@@ -248,17 +255,15 @@ func parseMetaFromHTML(doc *html.Node, target string) (string, string, []string)
 		}
 	}
 
-	// Build description from content if no meta description
 	if description == "" && len(paragraphs) > 0 {
 		description = strings.Join(paragraphs, " ")
-		if len(description) > 200 { // Truncate long descriptions
+		if len(description) > 200 {
 			description = description[:200] + "..."
 		}
 	} else if description == "" {
 		description = "No description available"
 	}
 
-	// Fix image URLs
 	if len(images) > 0 {
 		baseURL, err := url.Parse(target)
 		if err == nil {
@@ -272,7 +277,7 @@ func parseMetaFromHTML(doc *html.Node, target string) (string, string, []string)
 	return title, description, images
 }
 
-// Metadata fetch using HTTP client //
+// Main metadata fetch using HTTP client, fallback to headless browser if failed
 func fetchMetaEnhanced(target string) (string, string, []string) {
 	client := &http.Client{
 		Timeout: 10 * time.Second,
@@ -307,7 +312,7 @@ func fetchMetaEnhanced(target string) (string, string, []string) {
 	return parseMetaFromHTML(doc, target)
 }
 
-// Meta Extraction Utilities //
+// Meta Extraction Utilities
 
 func processMetaTag(n *html.Node, title, description *string, images *[]string) {
 	var name, property, content string
@@ -321,7 +326,6 @@ func processMetaTag(n *html.Node, title, description *string, images *[]string) 
 			content = attr.Val
 		}
 	}
-
 	if content == "" {
 		return
 	}
@@ -370,14 +374,12 @@ func generateMetaHTML(url, title, description string, images []string) string {
     <meta charset="utf-8">
     <title>%s</title>
     <meta name="description" content="%s">
-    
     <!-- Open Graph -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="%s">
     <meta property="og:title" content="%s">
     <meta property="og:description" content="%s">
     <meta property="og:image" content="%s">
-    
     <!-- Twitter -->
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="%s">
@@ -403,6 +405,8 @@ func generateMetaHTML(url, title, description string, images []string) string {
 		template.HTMLEscapeString(description),
 		template.HTMLEscapeString(url))
 }
+
+// URL fixing helpers
 
 func fixURL(img string, base *url.URL) string {
 	if img == "" {
