@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/chromedp"
 	"github.com/joho/godotenv"
 	"github.com/tdewolff/minify/v2"
@@ -20,7 +21,7 @@ import (
 	"golang.org/x/net/html"
 )
 
-const version = "v1.1.0"
+const version = "v1.2.0"
 
 var (
 	minifiedJS []byte
@@ -72,10 +73,11 @@ func main() {
 	fs := http.FileServer(http.Dir("static"))
 	http.Handle("/static/", http.StripPrefix("/static/", fs))
 
+	http.HandleFunc("/", withCORS(homeHandler))
 	http.HandleFunc("/api/embed", withCORS(embedHandler))
 	http.HandleFunc("/embed.js", withCORS(jsHandler))
 	http.HandleFunc("/embed.css", withCORS(cssHandler))
-	http.HandleFunc("/metagen", withCORS(metaGenHandler))
+	http.HandleFunc("/api/metagen", withCORS(metaGenHandler))
 	http.HandleFunc("/version", withCORS(versionHandler))
 
 	port := os.Getenv("PORT")
@@ -106,8 +108,10 @@ func metaGenHandler(w http.ResponseWriter, r *http.Request) {
 		targetURL = "https://" + targetURL
 	}
 
+	ua := r.URL.Query().Get("ua")
+
 	// Use enhanced fetch with headless fallback
-	title, description, images := fetchMetaEnhanced(targetURL)
+	title, description, images := fetchMetaEnhanced(targetURL, ua)
 	if len(images) == 0 {
 		if u, err := url.Parse(targetURL); err == nil {
 			images = append(images, "https://"+u.Host+"/favicon.ico")
@@ -138,8 +142,10 @@ func embedHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	ua := r.URL.Query().Get("ua")
+
 	// Use enhanced fetch with headless fallback
-	title, desc, images := fetchMetaEnhanced(url)
+	title, desc, images := fetchMetaEnhanced(url, ua)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(PageInfo{
 		Title:       title,
@@ -160,6 +166,336 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(version))
 }
 
+func homeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(homePageHTML))
+}
+
+const homePageHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>embed0 :: metadata extraction server</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    background:#0a0a0a;color:#00ff41;
+    font-family:"SF Mono","Fira Code","Cascadia Code",monospace;
+    font-size:14px;line-height:1.6;
+    padding:20px;max-width:900px;margin:0 auto;
+  }
+  a{color:#00ccff;text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  .header{
+    border:1px dashed #00ff41;padding:20px;margin-bottom:24px;
+    text-align:center;
+  }
+  .header h1{font-size:20px;font-weight:400;margin-bottom:8px}
+  .header .version{color:#666;font-size:12px}
+
+  .packet{
+    border:1px solid #333;padding:16px;margin-bottom:16px;
+    position:relative;
+  }
+  .packet::before{
+    content:"[PACKET]";position:absolute;top:-9px;left:12px;
+    background:#0a0a0a;padding:0 6px;font-size:10px;color:#666;
+  }
+
+  .divider{
+    border:none;border-top:1px dashed #333;
+    margin:20px 0;
+  }
+
+  .section-title{
+    color:#ffcc00;font-size:12px;text-transform:uppercase;
+    letter-spacing:2px;margin-bottom:12px;
+  }
+
+  .endpoint{
+    display:flex;align-items:center;gap:12px;
+    padding:8px 0;border-bottom:1px solid #1a1a1a;
+  }
+  .endpoint:last-child{border-bottom:none}
+  .method{
+    background:#00ff41;color:#000;padding:2px 8px;
+    font-size:11px;font-weight:700;min-width:50px;text-align:center;
+  }
+  .method.get{background:#00ff41}
+  .method.post{background:#ffcc00}
+  .path{color:#00ccff;min-width:140px}
+  .desc{color:#888;font-size:12px}
+
+  .explorer{margin-top:8px}
+  .explorer label{color:#666;font-size:11px;display:block;margin-bottom:4px}
+  .explorer input,.explorer select{
+    background:#111;border:1px solid #333;color:#00ff41;
+    font-family:inherit;font-size:13px;
+    padding:8px 12px;width:100%;margin-bottom:12px;
+  }
+  .explorer input:focus,.explorer select:focus{
+    outline:none;border-color:#00ff41;
+  }
+  .explorer button{
+    background:#00ff41;color:#000;border:none;
+    font-family:inherit;font-size:13px;font-weight:700;
+    padding:8px 24px;cursor:pointer;text-transform:uppercase;
+  }
+  .explorer button:hover{background:#00cc33}
+  .explorer button:active{transform:scale(0.98)}
+
+  .result{
+    background:#111;border:1px solid #333;
+    padding:16px;margin-top:16px;
+    font-size:12px;max-height:400px;overflow-y:auto;
+    display:none;
+  }
+  .result.visible{display:block}
+  .result .label{color:#666;font-size:10px;text-transform:uppercase;letter-spacing:1px}
+  .result .status{color:#00ff41;padding-bottom:8px;border-bottom:1px dashed #333}
+  .result .status.err{color:#ff4444}
+  .result .body{color:#ccc;white-space:pre-wrap;word-break:break-all;padding-top:8px}
+
+  .footer{
+    border:1px dashed #333;padding:16px;margin-top:24px;
+    text-align:center;color:#555;font-size:11px;
+  }
+
+  .ascii-art{
+    color:#333;font-size:11px;line-height:1.2;
+    text-align:center;margin-bottom:16px;
+  }
+
+  .stats{
+    display:grid;grid-template-columns:repeat(3,1fr);gap:12px;
+    margin-bottom:16px;
+  }
+  .stat{
+    border:1px solid #222;padding:12px;text-align:center;
+  }
+  .stat .num{color:#00ff41;font-size:18px}
+  .stat .label{color:#555;font-size:10px;text-transform:uppercase;margin-top:4px}
+
+  @media(max-width:600px){
+    .stats{grid-template-columns:1fr}
+    .endpoint{flex-direction:column;align-items:flex-start;gap:4px}
+  }
+  .img-panel details{margin-top:12px}
+  .img-panel summary{color:#ffcc00;cursor:pointer;font-size:12px}
+  .img-panel img{max-width:400px;max-height:250px;margin:8px 0;display:block;border:1px solid #333}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <pre class="ascii-art">
+   ___           ___           ___           ___           ___
+   /\  \         /\__\         /\  \         /\  \         /\  \
+   /::\  \       /::|  |       /::\  \       /::\  \       /::\  \
+   /:/\:\  \     /:|:|  |      /:/\:\  \     /:/\:\  \     /:/\:\  \
+   /::\~\:\  \   /:/|:|__|__   /::\~\:\__\   /::\~\:\  \   /:/  \:\__\
+   /:/\:\ \:\__\ /:/ |::::\__\ /:/\:\ \:|__| /:/\:\ \:\__\ /:/__/ \:|__|
+   \:\~\:\ \/__/ \/__/~~/:/  / \:\~\:\/:/  / \:\~\:\ \/__/ \:\  \ /:/  /
+   \:\ \:\__\         /:/  /   \:\ \::/  /   \:\ \:\__\    \:\  /:/  /
+   \:\ \/__/        /:/  /     \:\/:/  /     \:\ \/__/     \:\/:/  /
+   \:\__\         /:/  /       \::/__/       \:\__\        \::/__/
+\/__/         \/__/         ~~            \/__/         ~~
+  </pre>
+  <h1>embed0</h1>
+  <div class="version">` + version + ` // metadata extraction server</div>
+</div>
+
+<div class="stats">
+  <div class="stat">
+    <div class="num">5</div>
+    <div class="label">Endpoints</div>
+  </div>
+  <div class="stat">
+    <div class="num">3</div>
+    <div class="label">Themes</div>
+  </div>
+  <div class="stat">
+    <div class="num">5</div>
+    <div class="label">UA Presets</div>
+  </div>
+</div>
+
+<div class="packet">
+  <div class="section-title">// endpoints</div>
+  <div class="endpoint">
+    <span class="method get">GET</span>
+    <span class="path">/</span>
+    <span class="desc">API explorer (this page)</span>
+  </div>
+  <div class="endpoint">
+    <span class="method get">GET</span>
+    <span class="path">/api/embed</span>
+    <span class="desc">JSON metadata for target URL</span>
+  </div>
+  <div class="endpoint">
+    <span class="method get">GET</span>
+    <span class="path">/api/metagen</span>
+    <span class="desc">HTML page with OG/Twitter meta tags</span>
+  </div>
+  <div class="endpoint">
+    <span class="method get">GET</span>
+    <span class="path">/embed.js</span>
+    <span class="desc">Embeddable widget script</span>
+  </div>
+  <div class="endpoint">
+    <span class="method get">GET</span>
+    <span class="path">/embed.css</span>
+    <span class="desc">Widget stylesheet</span>
+  </div>
+  <div class="endpoint">
+    <span class="method get">GET</span>
+    <span class="path">/version</span>
+    <span class="desc">Server version string</span>
+  </div>
+</div>
+
+<hr class="divider">
+
+<div class="packet">
+  <div class="section-title">// api explorer</div>
+  <div class="explorer">
+    <label>TARGET URL</label>
+    <input type="text" id="targetUrl" placeholder="https://github.com" value="https://github.com">
+
+    <label>ENDPOINT</label>
+    <select id="endpoint">
+      <option value="api">/api/embed (JSON)</option>
+      <option value="metagen">/api/metagen (HTML)</option>
+      <option value="version">/version (text)</option>
+    </select>
+
+    <label>THEME</label>
+    <select id="theme">
+      <option value="light">light</option>
+      <option value="dark">dark</option>
+      <option value="minimal">minimal</option>
+    </select>
+
+    <label>USER-AGENT</label>
+    <select id="ua">
+      <option value="">default</option>
+      <option value="mobile">mobile</option>
+      <option value="bot">bot (Googlebot)</option>
+      <option value="twitter">twitter</option>
+      <option value="facebook">facebook</option>
+      <option value="discord">discord</option>
+    </select>
+
+    <button onclick="sendRequest()">TRANSMIT</button>
+
+    <div class="result" id="result">
+      <div class="label">response</div>
+      <div class="status" id="status"></div>
+      <div class="body" id="body"></div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<div class="packet">
+  <div class="section-title">// quick usage</div>
+  <div style="color:#888;font-size:12px;line-height:1.8">
+    <div><span style="color:#00ccff">curl</span> "http://HOST/api/embed?url=https://example.com"</div>
+    <div><span style="color:#00ccff">curl</span> "http://HOST/api/embed?url=https://example.com&theme=dark&ua=twitter"</div>
+    <div><span style="color:#00ccff">curl</span> "http://HOST/api/metagen?url=https://example.com"</div>
+    <div><span style="color:#00ccff">curl</span> "http://HOST/version"</div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<div class="packet">
+  <div class="section-title">// embed widget</div>
+  <div style="color:#888;font-size:12px;line-height:1.8">
+    <div style="color:#666">// add to any HTML page:</div>
+    <div>&lt;<span style="color:#ffcc00">link</span> rel="stylesheet" href="http://HOST/embed.css"&gt;</div>
+    <div>&lt;<span style="color:#ffcc00">div</span> data-url="https://example.com" data-theme="dark"&gt;&lt;/div&gt;</div>
+    <div>&lt;<span style="color:#ffcc00">script</span> async src="http://HOST/embed.js"&gt;&lt;/script&gt;</div>
+  </div>
+</div>
+
+<div class="footer">
+  embed0 v` + version + ` // net/http // Go // chromedp<br>
+  <a href="https://github.com/velox0/embed0">github.com/velox0/embed0</a>
+</div>
+
+<script>
+function sendRequest(){
+  var url=document.getElementById("targetUrl").value;
+  var ep=document.getElementById("endpoint").value;
+  var theme=document.getElementById("theme").value;
+  var ua=document.getElementById("ua").value;
+  var result=document.getElementById("result");
+  var status=document.getElementById("status");
+  var body=document.getElementById("body");
+
+  if(!url){alert("Enter a URL");return}
+
+  var reqUrl="";
+  if(ep==="api"){
+    reqUrl="/api/embed?url="+encodeURIComponent(url)+"&theme="+encodeURIComponent(theme);
+    if(ua)reqUrl+="&ua="+encodeURIComponent(ua);
+  }else if(ep==="metagen"){
+    reqUrl="/api/metagen?url="+encodeURIComponent(url);
+    if(ua)reqUrl+="&ua="+encodeURIComponent(ua);
+  }else if(ep==="version"){
+    reqUrl="/version";
+  }
+
+  result.classList.add("visible");
+  status.className="status";
+  status.textContent="[TX] transmitting to "+reqUrl+" ...";
+  body.textContent="";
+
+  fetch(reqUrl).then(function(r){
+    status.textContent="[RX] "+r.status+" "+r.statusText;
+    if(!r.ok)status.classList.add("err");
+    if(ep==="version")return r.text();
+    if(ep==="metagen")return r.text();
+    return r.json();
+  }).then(function(data){
+    if(ep==="version"){
+      body.textContent=data;
+    }else if(ep==="metagen"){
+      body.textContent=data.substring(0,2000)+"\n... (truncated)";
+    }else{
+      var json=JSON.stringify(data,null,2);
+      var imgHtml="";
+      if(data.images&&data.images.length>0){
+        imgHtml='<div class="img-panel"><details><summary>images ('+data.images.length+')</summary>';
+        data.images.forEach(function(img){
+          imgHtml+='<img src="'+img+'" alt="'+(data.title||'')+'">';
+        });
+        imgHtml+='</details></div>';
+      }
+      body.innerHTML='<pre>'+json.replace(/</g,"&lt;")+'</pre>'+imgHtml;
+    }
+  }).catch(function(e){
+    status.className="status err";
+    status.textContent="[ERR] "+e.message;
+  });
+}
+
+document.getElementById("targetUrl").addEventListener("keydown",function(e){
+  if(e.key==="Enter")sendRequest();
+});
+</script>
+
+</body>
+</html>`
+
 // Utility functions
 
 func withCORS(h http.HandlerFunc) http.HandlerFunc {
@@ -178,12 +514,13 @@ func withCORS(h http.HandlerFunc) http.HandlerFunc {
 // -------- HEADLESS BROWSER FALLBACK --------
 
 // Uses chromedp (Google Chrome) to fetch and parse metadata
-func fetchMetaWithHeadless(target string) (string, string, []string, error) {
+func fetchMetaWithHeadless(target string, userAgent string) (string, string, []string, error) {
 	ctx, cancel := chromedp.NewContext(context.Background())
 	defer cancel()
 	var htmlContent string
 
 	err := chromedp.Run(ctx,
+		emulation.SetUserAgentOverride(userAgent),
 		chromedp.Navigate(target),
 		chromedp.Sleep(3*time.Second),
 		chromedp.OuterHTML("html", &htmlContent),
@@ -278,7 +615,21 @@ func parseMetaFromHTML(doc *html.Node, target string) (string, string, []string)
 }
 
 // Main metadata fetch using HTTP client, fallback to headless browser if failed
-func fetchMetaEnhanced(target string) (string, string, []string) {
+func fetchMetaEnhanced(target string, ua string) (string, string, []string) {
+	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	switch ua {
+	case "mobile":
+		userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+	case "bot":
+		userAgent = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+	case "twitter":
+		userAgent = "Twitterbot/1.0"
+	case "facebook":
+		userAgent = "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"
+	case "discord":
+		userAgent = "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"
+	}
+
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 	}
@@ -287,12 +638,12 @@ func fetchMetaEnhanced(target string) (string, string, []string) {
 	if err != nil {
 		return target, "", nil
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", userAgent)
 
 	resp, err := client.Do(req)
 	if err != nil || (resp.StatusCode == 403 || resp.StatusCode == 503) {
 		// Fallback: Try fetching with headless browser
-		title, desc, images, err2 := fetchMetaWithHeadless(target)
+		title, desc, images, err2 := fetchMetaWithHeadless(target, userAgent)
 		if err2 == nil {
 			return title, desc, images
 		}
@@ -303,7 +654,7 @@ func fetchMetaEnhanced(target string) (string, string, []string) {
 	doc, err := html.Parse(resp.Body)
 	if err != nil {
 		// Fallback: Try with headless browser if parsing fails
-		title, desc, images, err2 := fetchMetaWithHeadless(target)
+		title, desc, images, err2 := fetchMetaWithHeadless(target, userAgent)
 		if err2 == nil {
 			return title, desc, images
 		}
